@@ -40,14 +40,12 @@ public class AvroFormat implements Format<S3SinkConnectorConfig, String> {
 
   @Override
   public SchemaFileReader<S3SinkConnectorConfig, String> getSchemaFileReader() {
-    throw new UnsupportedOperationException("Reading schemas from S3 is not currently supported");
+    return new AvroFileReader(storage, avroData);
   }
 
   @Override
   public HiveFactory getHiveFactory() {
-    throw new UnsupportedOperationException(
-        "Hive integration is not currently supported in S3 Connector"
-    );
+    return new AvroHiveFactory(avroData);
   }
 
   public AvroData getAvroData() {

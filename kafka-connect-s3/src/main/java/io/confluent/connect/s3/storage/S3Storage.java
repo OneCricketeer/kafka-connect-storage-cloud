@@ -61,6 +61,10 @@ public class S3Storage implements Storage<S3SinkConnectorConfig, ObjectListing> 
     this.s3 = newS3Client(conf);
   }
 
+  public AmazonS3 newS3Client() {
+    return newS3Client(this.conf);
+  }
+
   public AmazonS3 newS3Client(S3SinkConnectorConfig config) {
     ClientConfiguration clientConfiguration = newClientConfiguration(config);
     AmazonS3ClientBuilder builder = AmazonS3ClientBuilder.standard()

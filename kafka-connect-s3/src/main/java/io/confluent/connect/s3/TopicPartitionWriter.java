@@ -16,6 +16,8 @@
 
 package io.confluent.connect.s3;
 
+import io.confluent.connect.storage.hive.HiveMetaStore;
+import io.confluent.connect.storage.hive.HiveUtil;
 import org.apache.hadoop.hive.metastore.api.FieldSchema;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.connect.data.Schema;
@@ -31,9 +33,13 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.Map;
 import java.util.Queue;
+import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
 
 import io.confluent.common.utils.SystemTime;
 import io.confluent.common.utils.Time;
@@ -80,10 +86,19 @@ public class TopicPartitionWriter {
   private final StorageSchemaCompatibility compatibility;
   private final String extension;
   private final String zeroPadOffsetFormat;
+  private final boolean hiveIntegration;
   private final String dirDelim;
   private final String fileDelim;
   private final Time time;
   private DateTimeZone timeZone;
+  private final String hiveDatabase;
+  private final HiveMetaStore hiveMetaStore;
+  private final io.confluent.connect.storage.format.SchemaFileReader<S3SinkConnectorConfig, String>
+          schemaFileReader;
+  private final HiveUtil hive;
+  private final ExecutorService executorService;
+  private final Queue<Future<Void>> hiveUpdateFutures;
+  private final Set<String> hivePartitions;
   private final S3SinkConnectorConfig connectorConfig;
   private static final Time SYSTEM_TIME = new SystemTime();
 
@@ -103,6 +118,24 @@ public class TopicPartitionWriter {
                        S3SinkConnectorConfig connectorConfig,
                        SinkTaskContext context,
                        Time time) {
+    this(tp, writerProvider, partitioner, connectorConfig, context,
+            null, null, null, null, null,
+            SYSTEM_TIME);
+  }
+
+  public TopicPartitionWriter(
+          TopicPartition tp,
+          RecordWriterProvider<S3SinkConnectorConfig> writerProvider,
+          Partitioner<FieldSchema> partitioner,
+          S3SinkConnectorConfig connectorConfig,
+          SinkTaskContext context,
+          HiveMetaStore hiveMetaStore,
+          HiveUtil hive,
+          io.confluent.connect.storage.format.SchemaFileReader<S3SinkConnectorConfig, String>
+                  schemaFileReader,
+          ExecutorService executorService,
+          Queue<Future<Void>> hiveUpdateFutures,
+          Time time) {
     this.connectorConfig = connectorConfig;
     this.time = time;
     this.tp = tp;
@@ -112,6 +145,7 @@ public class TopicPartitionWriter {
     this.timestampExtractor = partitioner instanceof TimeBasedPartitioner
                                   ? ((TimeBasedPartitioner) partitioner).getTimestampExtractor()
                                   : null;
+    this.schemaFileReader = schemaFileReader;
     flushSize = connectorConfig.getInt(S3SinkConnectorConfig.FLUSH_SIZE_CONFIG);
     topicsDir = connectorConfig.getString(StorageCommonConfig.TOPICS_DIR_CONFIG);
     rotateIntervalMs = connectorConfig.getLong(S3SinkConnectorConfig.ROTATE_INTERVAL_MS_CONFIG);
@@ -138,6 +172,19 @@ public class TopicPartitionWriter {
     zeroPadOffsetFormat = "%0"
         + connectorConfig.getInt(S3SinkConnectorConfig.FILENAME_OFFSET_ZERO_PAD_WIDTH_CONFIG)
         + "d";
+
+    hiveIntegration = connectorConfig.getBoolean(HiveConfig.HIVE_INTEGRATION_CONFIG);
+    if (hiveIntegration) {
+      hiveDatabase = connectorConfig.getString(HiveConfig.HIVE_DATABASE_CONFIG);
+    } else {
+      hiveDatabase = null;
+    }
+
+    this.hiveMetaStore = hiveMetaStore;
+    this.hive = hive;
+    this.executorService = executorService;
+    this.hiveUpdateFutures = hiveUpdateFutures;
+    hivePartitions = new HashSet<>();
 
     // Initialize scheduled rotation timer if applicable
     setNextScheduledRotation();

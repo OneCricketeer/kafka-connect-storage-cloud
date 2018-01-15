@@ -23,6 +23,7 @@ import io.confluent.connect.storage.format.Format;
 import io.confluent.connect.storage.format.RecordWriterProvider;
 import io.confluent.connect.storage.format.SchemaFileReader;
 import io.confluent.connect.storage.hive.HiveFactory;
+import io.confluent.connect.storage.hive.avro.AvroHiveFactory;
 
 public class AvroFormat implements Format<S3SinkConnectorConfig, String> {
   private final S3Storage storage;

@@ -20,9 +20,7 @@ import com.amazonaws.AmazonServiceException;
 import com.amazonaws.services.s3.AmazonS3;
 import com.amazonaws.services.s3.model.S3Object;
 import io.confluent.connect.s3.storage.S3Storage;
-import org.apache.avro.file.DataFileStream;
-import org.apache.avro.generic.GenericDatumReader;
-import org.apache.avro.io.DatumReader;
+import io.confluent.connect.storage.format.util.AvroUtils;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.errors.DataException;
 
@@ -51,31 +49,28 @@ public class AvroFileReader
         this.avroData = avroData;
     }
 
-    private org.apache.avro.Schema getSchema(InputStream is) throws IOException {
-        DatumReader<Object> reader = new GenericDatumReader<>();
-        DataFileStream<Object> streamReader = new DataFileStream<>(is, reader);
-        org.apache.avro.Schema schema = streamReader.getSchema();
-        streamReader.close();
-        return schema;
-    }
-
     @Override
     public Schema getSchema(S3SinkConnectorConfig conf, String key) {
         try (S3Object obj = s3.getObject(conf.getBucketName(), key)) {
             InputStream is = obj.getObjectContent();
-            return avroData.toConnectSchema(getSchema(is));
-        } catch (AmazonServiceException e) {
-            log.warn("Unable to read schema. Attempting to retry.", e);
-            if (e.isRetryable() && retries < RETRY_ATTEMPTS) {
+            return avroData.toConnectSchema(AvroUtils.getSchema(is));
+        } catch (AmazonServiceException amznEx) {
+            log.warn("Unable to read schema. Attempting to retry.", amznEx);
+            if (amznEx.isRetryable() && retries < RETRY_ATTEMPTS) {
                 retries++;
+                try {
+                    Thread.sleep(200 << retries);
+                } catch (InterruptedException e) {
+                    log.error("Interrupted while trying to retry.", e);
+                }
                 return getSchema(conf, key);
             } else {
                 StringBuilder sb = new StringBuilder("Failed to read schema.");
                 if (retries >= RETRY_ATTEMPTS) {
                     sb.append(" Max retry attempts reached.");
                 }
-                log.error(sb.toString(), e);
-                throw new DataException(e);
+                log.error(sb.toString(), amznEx);
+                throw new DataException(amznEx);
             }
         } catch (IOException e) {
             throw new DataException(e);

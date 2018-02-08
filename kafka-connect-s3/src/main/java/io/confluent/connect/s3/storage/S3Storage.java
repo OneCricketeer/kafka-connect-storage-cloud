@@ -22,9 +22,11 @@ import com.amazonaws.client.builder.AwsClientBuilder;
 import com.amazonaws.regions.Regions;
 import com.amazonaws.services.s3.AmazonS3;
 import com.amazonaws.services.s3.AmazonS3ClientBuilder;
-import com.amazonaws.services.s3.model.ObjectListing;
+import com.amazonaws.services.s3.model.*;
 import org.apache.avro.file.SeekableInput;
 
+import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 
 import io.confluent.connect.s3.S3SinkConnectorConfig;
@@ -46,6 +48,8 @@ public class S3Storage implements Storage<S3SinkConnectorConfig, ObjectListing> 
   private final String bucketName;
   private final AmazonS3 s3;
   private final S3SinkConnectorConfig conf;
+  private final int maxKeys;
+  private ListObjectsRequest listObjectRequest;
   private static final String VERSION_FORMAT = "APN/1.0 Confluent/1.0 KafkaS3Connector/%s";
 
   /**
@@ -59,6 +63,7 @@ public class S3Storage implements Storage<S3SinkConnectorConfig, ObjectListing> 
     this.conf = conf;
     this.bucketName = conf.getBucketName();
     this.s3 = newS3Client(conf);
+    this.maxKeys = conf.getMaxKeys();
   }
 
   public AmazonS3 newS3Client() {
@@ -95,6 +100,7 @@ public class S3Storage implements Storage<S3SinkConnectorConfig, ObjectListing> 
     this.conf = conf;
     this.bucketName = bucketName;
     this.s3 = s3;
+    this.maxKeys = conf.getMaxKeys();
   }
 
   // Visible for testing.
@@ -170,7 +176,15 @@ public class S3Storage implements Storage<S3SinkConnectorConfig, ObjectListing> 
 
   @Override
   public ObjectListing list(String path) {
-    return s3.listObjects(bucketName, path);
+    this.listObjectRequest = new ListObjectsRequest()
+            .withBucketName(bucketName)
+            .withPrefix(path)
+            .withMaxKeys(maxKeys);
+    return s3.listObjects(listObjectRequest);
+  }
+
+  public ObjectListing nextList(ObjectListing previousListing) {
+      return s3.listNextBatchOfObjects(previousListing);
   }
 
   @Override
@@ -188,5 +202,9 @@ public class S3Storage implements Storage<S3SinkConnectorConfig, ObjectListing> 
     throw new UnsupportedOperationException(
         "File reading is not currently supported in S3 Connector"
     );
+  }
+
+  public InputStream open(String path) {
+    return s3.getObject(bucketName, path).getObjectContent();
   }
 }

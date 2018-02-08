@@ -17,26 +17,40 @@
 package io.confluent.connect.s3;
 
 import com.amazonaws.AmazonClientException;
+import io.confluent.connect.storage.common.util.StringUtils;
 import org.apache.hadoop.hive.metastore.api.FieldSchema;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.config.ConfigException;
+import org.apache.kafka.common.utils.Utils;
+import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.errors.DataException;
 import org.apache.kafka.connect.sink.SinkRecord;
 import org.apache.kafka.connect.sink.SinkTask;
 import org.apache.kafka.connect.sink.SinkTaskContext;
+import org.joda.time.DateTimeZone;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.lang.reflect.InvocationTargetException;
 import java.util.Collection;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
+
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 import io.confluent.common.utils.SystemTime;
 import io.confluent.common.utils.Time;
+import io.confluent.connect.avro.AvroData;
+import io.confluent.connect.storage.StorageSinkConnectorConfig;
+import io.confluent.connect.storage.format.SchemaFileReader;
+import io.confluent.connect.storage.hive.HiveConfig;
+import io.confluent.connect.storage.hive.HiveMetaStore;
+import io.confluent.connect.storage.hive.HiveUtil;
+import io.confluent.connect.storage.schema.StorageSchemaCompatibility;
 import io.confluent.connect.s3.storage.S3Storage;
 import io.confluent.connect.s3.util.Version;
 import io.confluent.connect.storage.StorageFactory;
@@ -57,7 +71,17 @@ public class S3SinkTask extends SinkTask {
   private Partitioner<FieldSchema> partitioner;
   private Format<S3SinkConnectorConfig, String> format;
   private RecordWriterProvider<S3SinkConnectorConfig> writerProvider;
+  private SchemaFileReader<S3SinkConnectorConfig, String> schemaFileReader;
   private final Time time;
+  private AvroData avroData;
+  private String delim;
+  private String topicsDir;
+  private ExecutorService executorService;
+  private String hiveDatabase;
+  private HiveMetaStore hiveMetaStore;
+  private HiveUtil hive;
+  private Queue<Future<Void>> hiveUpdateFutures;
+  private boolean hiveIntegration;
 
   /**
    * No-arg constructor. Used by Connect framework.
@@ -84,6 +108,7 @@ public class S3SinkTask extends SinkTask {
 
     url = connectorConfig.getString(StorageCommonConfig.STORE_URL_CONFIG);
     writerProvider = this.format.getRecordWriterProvider();
+    schemaFileReader = this.format.getSchemaFileReader();
 
     open(context.assignment());
     log.info("Started S3 connector task with assigned partitions {}", assignment);
@@ -107,11 +132,38 @@ public class S3SinkTask extends SinkTask {
       if (!storage.bucketExists()) {
         throw new DataException("No-existent S3 bucket: " + connectorConfig.getBucketName());
       }
+      topicsDir = connectorConfig.getString(StorageCommonConfig.TOPICS_DIR_CONFIG);
+
+      executorService = Executors.newSingleThreadExecutor();
+      setupHiveIntegration();
+      checkScheduledRotationTimeZone();
 
       writerProvider = newFormat().getRecordWriterProvider();
       partitioner = newPartitioner(connectorConfig);
+      delim = (String) connectorConfig.get(StorageCommonConfig.DIRECTORY_DELIM_CONFIG);
+
+      for (TopicPartition tp : assignment) {
+        TopicPartitionWriter topicPartitionWriter = new TopicPartitionWriter(
+                tp,
+                storage,
+                writerProvider,
+                partitioner,
+                connectorConfig,
+                context,
+                hiveMetaStore,
+                hive,
+                schemaFileReader,
+                executorService,
+                hiveUpdateFutures,
+                time
+        );
+        topicPartitionWriters.put(tp, topicPartitionWriter);
+      }
 
       open(context.assignment());
+      if (hiveIntegration) {
+        syncWithHive();
+      }
       log.info("Started S3 connector task with assigned partitions: {}", assignment);
     } catch (ClassNotFoundException | IllegalAccessException | InstantiationException
         | InvocationTargetException | NoSuchMethodException e) {
@@ -119,6 +171,44 @@ public class S3SinkTask extends SinkTask {
     } catch (AmazonClientException e) {
       throw new ConnectException(e);
     }
+  }
+
+  /**
+   * Check that timezone it setup correctly in case of scheduled rotation
+   */
+  protected void checkScheduledRotationTimeZone() {
+    if (connectorConfig.getLong(StorageSinkConnectorConfig.ROTATE_SCHEDULE_INTERVAL_MS_CONFIG) > 0) {
+      String timeZoneString = connectorConfig.getString(PartitionerConfig.TIMEZONE_CONFIG);
+      if (StringUtils.isBlank(timeZoneString)) {
+        throw new ConfigException(PartitionerConfig.TIMEZONE_CONFIG,
+                timeZoneString, "Timezone cannot be empty when using scheduled file rotation."
+        );
+      }
+      DateTimeZone.forID(timeZoneString);
+    }
+  }
+
+  /**
+   * Sets up Hive Integration
+   * @return true if Hive integration is enabled
+   */
+  protected boolean setupHiveIntegration() {
+    hiveIntegration = connectorConfig.getBoolean(HiveConfig.HIVE_INTEGRATION_CONFIG);
+    if (hiveIntegration) {
+      StorageSchemaCompatibility compatibility = StorageSchemaCompatibility.getCompatibility(
+              connectorConfig.getString(HiveConfig.SCHEMA_COMPATIBILITY_CONFIG)
+      );
+      if (compatibility == StorageSchemaCompatibility.NONE) {
+        throw new ConfigException(
+                "Hive Integration requires schema compatibility to be BACKWARD, FORWARD or FULL"
+        );
+      }
+      hiveDatabase = connectorConfig.getString(HiveConfig.HIVE_DATABASE_CONFIG);
+      hiveMetaStore = new HiveMetaStore(connectorConfig);
+      hive = format.getHiveFactory().createHiveUtil(connectorConfig, hiveMetaStore);
+      hiveUpdateFutures = new LinkedList<>();
+    }
+    return hiveIntegration;
   }
 
   @Override
@@ -134,6 +224,7 @@ public class S3SinkTask extends SinkTask {
     for (TopicPartition tp : assignment) {
       TopicPartitionWriter writer = new TopicPartitionWriter(
           tp,
+          storage,
           writerProvider,
           partitioner,
           connectorConfig,
@@ -191,6 +282,25 @@ public class S3SinkTask extends SinkTask {
       log.debug("Read {} records from Kafka", records.size());
     }
 
+    if (hiveIntegration) {
+      Iterator<Future<Void>> iterator = hiveUpdateFutures.iterator();
+      while (iterator.hasNext()) {
+        try {
+          Future<Void> future = iterator.next();
+          if (future.isDone()) {
+            future.get();
+            iterator.remove();
+          } else {
+            break;
+          }
+        } catch (ExecutionException e) {
+          throw new RuntimeException(e);
+        } catch (InterruptedException e) {
+          // ignore
+        }
+      }
+    }
+
     for (TopicPartition tp : assignment) {
       topicPartitionWriters.get(tp).write();
     }
@@ -238,6 +348,45 @@ public class S3SinkTask extends SinkTask {
     } catch (Exception e) {
       throw new ConnectException(e);
     }
+  }
+
+  private void syncWithHive() throws ConnectException {
+    Set<String> topics = new HashSet<>();
+    for (TopicPartition tp : assignment) {
+      topics.add(tp.topic());
+    }
+
+    for (String topic : topics) {
+      String topicDir = Utils.join(Arrays.asList(url, topicsDir, topic), delim);
+//        CommittedFileFilter filter = new TopicCommittedFileFilter(topic);
+      String keyWithMaxOffset = FileUtils.keyWithMaxOffset(
+              storage,
+              topicDir
+      );
+      if (keyWithMaxOffset != null) {
+//          final Path path = fileStatusWithMaxOffset.getPath();
+        final Schema latestSchema;
+        latestSchema = schemaFileReader.getSchema(
+                connectorConfig,
+                keyWithMaxOffset
+        );
+        hive.createTable(hiveDatabase, topic, latestSchema, partitioner);
+        List<String> partitions = hiveMetaStore.listPartitions(hiveDatabase, topic, (short) -1);
+//          FileStatus[] statuses = FileUtils.getDirectories(storage, new Path(topicDir));
+        String[] keys = new String[] {}; // TODO: List S3 keys from bucket
+        for (String location : keys) {
+          if (!partitions.contains(location)) {
+            String partitionValue = getPartitionValue(location);
+            hiveMetaStore.addPartition(hiveDatabase, topic, partitionValue);
+          }
+        }
+      }
+    }
+  }
+
+  private String getPartitionValue(String path) {
+    String[] parts = path.split("/");
+    return Utils.join(Arrays.copyOfRange(parts, 3, parts.length), "/");
   }
 
   // Visible for testing

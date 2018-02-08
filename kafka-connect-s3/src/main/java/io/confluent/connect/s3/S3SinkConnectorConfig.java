@@ -66,6 +66,9 @@ public class S3SinkConnectorConfig extends StorageSinkConnectorConfig {
   public static final String PART_SIZE_CONFIG = "s3.part.size";
   public static final int PART_SIZE_DEFAULT = 25 * 1024 * 1024;
 
+  public static final String MAX_KEYS_CONFIG = "s3.max.keys";
+  public static final int MAX_KEYS_DEFAULT = 10000;
+
   public static final String WAN_MODE_CONFIG = "s3.wan.mode";
   private static final boolean WAN_MODE_DEFAULT = false;
 
@@ -175,6 +178,19 @@ public class S3SinkConnectorConfig extends StorageSinkConnectorConfig {
           ++orderInGroup,
           Width.LONG,
           "S3 Part Size"
+      );
+
+      configDef.define(
+              MAX_KEYS_CONFIG,
+              Type.INT,
+              MAX_KEYS_DEFAULT,
+              new PartRange(),
+              Importance.LOW,
+              "The maximum keys to fetch at once when listing the S3 Bucket.",
+              group,
+              ++orderInGroup,
+              Width.LONG,
+              "S3 Max Keys Request Size"
       );
 
       configDef.define(
@@ -422,6 +438,10 @@ public class S3SinkConnectorConfig extends StorageSinkConnectorConfig {
       map.putAll(config.values());
     }
     return map;
+  }
+
+  public int getMaxKeys() {
+    return getInt(MAX_KEYS_CONFIG);
   }
 
   private static class PartRange implements ConfigDef.Validator {

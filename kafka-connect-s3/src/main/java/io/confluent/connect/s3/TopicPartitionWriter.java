@@ -108,23 +108,25 @@ public class TopicPartitionWriter {
                               Partitioner<FieldSchema> partitioner,
                               S3SinkConnectorConfig connectorConfig,
                               SinkTaskContext context) {
-    this(tp, writerProvider, partitioner, connectorConfig, context, SYSTEM_TIME);
+    this(tp, storage, writerProvider, partitioner, connectorConfig, context, SYSTEM_TIME);
   }
 
   // Visible for testing
   TopicPartitionWriter(TopicPartition tp,
+                       S3Storage storage,
                        RecordWriterProvider<S3SinkConnectorConfig> writerProvider,
                        Partitioner<FieldSchema> partitioner,
                        S3SinkConnectorConfig connectorConfig,
                        SinkTaskContext context,
                        Time time) {
-    this(tp, writerProvider, partitioner, connectorConfig, context,
+    this(tp, storage, writerProvider, partitioner, connectorConfig, context,
             null, null, null, null, null,
             SYSTEM_TIME);
   }
 
   public TopicPartitionWriter(
           TopicPartition tp,
+          S3Storage storage,
           RecordWriterProvider<S3SinkConnectorConfig> writerProvider,
           Partitioner<FieldSchema> partitioner,
           S3SinkConnectorConfig connectorConfig,
